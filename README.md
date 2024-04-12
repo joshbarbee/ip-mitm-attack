@@ -1,6 +1,13 @@
 # MITM IP attack
 
+Uses arpspoof to create a MITM proxy between target and gateway. Then, launches a malicious DNS server which forges certain DNS responses. See example usage for more details on how to run
+
 ## Virtual Machine Setup
+
+Todo:
+1. More spoofing? Spoof TCP sessions themselves, or be able to listen in w/o DNS
+2. Is HTTPs possible? What if our malicious site itself uses https?
+3. DNS over HTTPs is a pretty big knock. If we can detect DNS over HTTPs, we can block that traffic and force downgrade to regular DNS
 
 Right now, I think only two virtual machines are needed.
 
@@ -44,6 +51,12 @@ Example usage may be:
 `python mitm.py -t 10.0.2.15 -g 10.0.2.1 -i enp0s3 -s 1.2.3.4`
 
 This creates a MITM attack between the target IP address `-t` and gateway address `-g`. It will run on the interface `enp0s3` and spoof all DNS requests with the IP address `1.2.3.4`.
+
+To test the MITM attack worked, after running a command similar to the above, run a simple curl/wget command to a HTTP endpoint that does not use HTTPS, For example
+1. `example.com`
+2. `info.cern.ch`
+3. Any arbitrary IP with the above setting of `-s/--spoof-ip`. With the particular setting, all traffic is redirected to `1.2.3.4`
+When running curl/wget, you can then see the victim is redirected to the IP `1.2.3.4`, rather than the IP address of the actual web server. From this, you can run a malicious web server at the configured IP address.
 
 * If the interface options `-i/--interface` is not provided, the user will be prompted for an interface to use. This is typically something along the lines of `enp0s3` or `eth0`, not `lo` (the loopback adapter)
 * If the option `-s/spoof-ip` is not set, the user will be prompted to create a mapping between hostnames and IP addresses to spoof. This prompt includes the ability to spoof all DNS, similar to the launch argument
