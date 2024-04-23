@@ -1,5 +1,7 @@
 # MITM IP attack
 
+The generated certificates in the certificate folder aren't actual certs. So you aren't compromising anything Github bots!
+
 Uses arpspoof to create a MITM proxy between target and gateway. Then, launches a malicious DNS server which forges certain DNS responses. See example usage for more details on how to run
 
 ## Virtual Machine Setup
