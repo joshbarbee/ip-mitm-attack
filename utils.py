@@ -73,6 +73,17 @@ def prompt_pcap_path():
         
         print("> Invalid path. Unable to create PCAP at provided path")
 
+def prompt_ip_type():
+    print("> Use IPv4 and ARP packets or IPv6 and NDP")
+    print("> Enter '4' for IPv4 and ARP, '6' for IPv6 and NDP")
+
+    while True:
+        ip_type = input("> ip type: ")
+
+        if ip_type in {'4', '6'}:
+            return ip_type
+        print("> Invalid IP type. Try again")
+
 def validate_path(path):
     if len(path) == 0:
         return False
