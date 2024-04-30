@@ -4,43 +4,6 @@ The generated certificates in the certificate folder aren't actual certs. So you
 
 Uses arpspoof to create a MITM proxy between target and gateway. Then, launches a malicious DNS server which forges certain DNS responses. See example usage for more details on how to run
 
-## Virtual Machine Setup
-
-Todo:
-1. More spoofing? Spoof TCP sessions themselves, or be able to listen in w/o DNS
-2. Is HTTPs possible? What if our malicious site itself uses https?
-3. DNS over HTTPs is a pretty big knock. If we can detect DNS over HTTPs, we can block that traffic and force downgrade to regular DNS
-
-Right now, I think only two virtual machines are needed.
-
-In VirtualBox, create two machines according to your own specs (RAM, CPU, whatever). After creation, we will enable NAT networks.
-
-* For Virtualbox 7.0.X and later
-
-1. Go to File > Tools > Network Manager
-2. Change the tab to the NAT networks tab
-3. Create a new NAT network via create button
-4. Go to victim VM Settings > Network
-5. Change adapter 1 to NAT network, probably named NatNetwork after the network you just created
-6. Change MAC address to unique MAC address in advanced tab.
-7. Boot machines. If machines were created via clone in VirtualBox, you will need to delete the file `/etc/machine-id` within each VM and then reboot.
-8. At this point, VMs should be able to network with each other as well as external internet.
-
-You may encounter weird graphical issues when using Ubuntu 22.04 with Guest Additions. This is due to Virtualbox not being compatible
-with the latest release of Ubuntu drivers. The fix is to disable Wayland and use Xorg instead. Follow this to turn Wayland off: `https://linuxconfig.org/how-to-enable-disable-wayland-on-ubuntu-22-04-desktop`
-
-## Set up shared folders to share attacker script
-
-1. Make sure Guest Additions is installed in VirtualBox to enabled Shared Folders. Otherwise, it will be a pain to copy files between. See https://old.reddit.com/r/virtualbox/comments/12vkjwk/where_to_download_guest_additions_iso/ and https://askubuntu.com/questions/22743/how-do-i-install-guest-additions-in-a-virtualbox-vm for any / any issues
-
-2. For the attacker VM, go to Settings > Shared Folders
-
-3. Create a new shared folder with this directory and the VM. Mount anywhere (probably somewhere like ./ip-spoofing)
-
-4. In the attacker machine, CD to that directory and run desired scripts (like start.sh)
-
-## Running attacks
-
 1. Install all necessary packages (net-tools to see IPs, python, etc) by running `sh setup.sh` with root privileges.
 2. Get Victim IP by running `ifconfig` on victim machine.
 3. Run `python mitm.py --help` to see how to use the tool.
